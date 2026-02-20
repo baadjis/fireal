@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/avis-echeance",
+      "schedule": "0 8 1 * *"
+    }
+  ]
+}
