@@ -45,7 +45,7 @@ export async function confirmerPaiementEtEnvoyerQuittance(locataireId: string) {
 
     // 3. Envoyer l'email de confirmation
     await resend.emails.send({
-      from: 'LocaManager <gestion@votre-domaine.com>',
+      from: 'LocAm <gestion@getlocam.com>',
       to: loc.email,
       subject: `Quittance de loyer - ${moisNom}`,
       attachments: [{
@@ -62,9 +62,18 @@ export async function confirmerPaiementEtEnvoyerQuittance(locataireId: string) {
     // 4. (Optionnel) Ici on pourrait enregistrer en base que le mois est payé
     
     revalidatePath('/locataires');
+    // Enregistrer le paiement dans l'historique
+await prisma.paiement.create({
+  data: {
+    locataireId: locataireId,
+    mois: new Date().getMonth() + 1,
+    annee: new Date().getFullYear(),
+  }
+});
     return { success: true };
 
   } catch (error: any) {
+    console.log(error)
     return { error: error.message };
   }
 }

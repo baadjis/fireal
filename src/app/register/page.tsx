@@ -61,6 +61,13 @@ export default function RegisterPage() {
           Google
         </button>
 
+        <p className="text-[10px] text-gray-400 text-center mt-4">
+  En créant un compte, vous acceptez nos{" "}
+  <Link href="/terms" className="underline">Conditions d&apos;utilisation</Link>{" "}
+  et notre{" "}
+  <Link href="/privacy" className="underline">Politique de confidentialité</Link>.
+</p>
+
         <p className="text-center text-sm text-gray-600 mt-6">
           Déjà un compte ? <Link href="/login" className="text-blue-600 hover:underline">Se connecter</Link>
         </p>

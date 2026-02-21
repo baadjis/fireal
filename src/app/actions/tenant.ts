@@ -73,7 +73,7 @@ export async function createTenant(formData: FormData) {
 
         // Envoi par Resend
         await resend.emails.send({
-          from: 'LocaManager <contrats@votre-domaine.com>',
+          from: 'LocaManager <gestion@getlocam.com>',
           to: locataireCree.email,
           subject: `Votre contrat de location - ${bien.nom}`,
           attachments: [{ 
