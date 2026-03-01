@@ -11,54 +11,77 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ locataireId: string }> }
 ) {
-  // 1. Vérification de la session
-  const session = await getServerSession(authOptions);
-  if (!session) return new NextResponse("Non autorisé", { status: 401 });
-
-  const userId = (session.user as any).id;
   const { locataireId } = await params;
+  const { searchParams } = new URL(request.url);
+  const tokenParam = searchParams.get('token'); // Récupération du token depuis l'URL
+
+  // 1. On tente de récupérer la session (si elle existe)
+  const session = await getServerSession(authOptions);
+  const userId = (session?.user as any)?.id;
 
   try {
-    // 2. Récupérer toutes les données nécessaires
-    const locataire = await prisma.locataire.findFirst({
+    // 2. VÉRIFICATION DE SÉCURITÉ HYBRIDE
+    const locataireCheck = await prisma.locataire.findFirst({
       where: { 
         id: locataireId,
-        bien: { proprietaireId: userId } // Sécurité : vérifie la propriété
+        OR: [
+          // Option A : Utilisateur connecté est le proprio
+          { bien: { proprietaireId: userId || 'non-connecté' } }, 
+          // Option B : Utilisateur connecté est le locataire lié
+          { userId: userId || 'non-connecté' },
+          // Option C : Accès public via Token valide (pour signature)
+          { 
+            AND: [
+              { tokenSignature: tokenParam || 'aucun-token' },
+              { statut: { in: ['BROUILLON', 'ATTENTE_SIGNATURE'] } }
+            ]
+          }
+        ]
       },
-      include: { bien: true }
+      select: { bienId: true, id: true }
     });
 
-    const proprietaire = await prisma.user.findUnique({ 
-      where: { id: userId } 
-    });
-
-    if (!locataire || !proprietaire) {
-      return new NextResponse("Document non trouvé", { status: 404 });
+    if (!locataireCheck) {
+      return new NextResponse("Accès non autorisé ou lien expiré", { status: 403 });
     }
 
-    // 3. Générer le PDF en utilisant le template du Contrat (Bail)
+    // 3. RÉCUPÉRATION DES DONNÉES POUR LE TEMPLATE
+    const bienComplet = await prisma.bien.findUnique({
+      where: { id: locataireCheck.bienId },
+      include: {
+        proprietaire: true,
+        locataires: {
+          where: { active: true, archived: false },
+          orderBy: { createdAt: 'asc' }
+        }
+      }
+    });
+
+    if (!bienComplet) return new NextResponse("Erreur données", { status: 404 });
+
+    const currentLocataire = bienComplet.locataires.find(l => l.id === locataireId);
+
+    // 4. GÉNÉRATION DU PDF
     const buffer = await renderToBuffer(
       React.createElement(ContratBail, { 
-        locataire: locataire, 
-        bien: locataire.bien, 
-        proprietaire: proprietaire 
+        locataire: currentLocataire, 
+        bien: bienComplet, 
+        proprietaire: bienComplet.proprietaire 
       })
     );
 
-    // 4. Conversion pour Next.js 15 / TypeScript
     const pdfUint8Array = new Uint8Array(buffer);
 
-    // 5. Retourner le PDF
     return new NextResponse(pdfUint8Array, {
       headers: {
         'Content-Type': 'application/pdf',
-        // "inline" pour l'ouvrir dans le navigateur, "attachment" pour le télécharger
-        'Content-Disposition': `inline; filename=Contrat_Bail_${locataire.nom}.pdf`,
+        'Content-Disposition': `inline; filename=Bail_${currentLocataire?.nom}.pdf`,
+        'Cache-Control': 'no-store'
       },
     });
 
   } catch (error) {
-    console.error("Erreur génération contrat:", error);
-    return new NextResponse("Erreur interne", { status: 500 });
+    console.error("Erreur API Contrat:", error);
+    return new NextResponse("Erreur serveur", { status: 500 });
   }
 }

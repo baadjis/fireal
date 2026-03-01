@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-non-null-asserted-optional-chain */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 'use server'
 
 import Stripe from 'stripe';
@@ -5,6 +7,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 import prisma from "@/lib/prisma";
 import { redirect } from 'next/navigation';
+import { revalidatePath } from 'next/cache';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-01-27' });
 
@@ -38,12 +41,23 @@ export async function createConnectAccount() {
   redirect(accountLink.url);
 }
 
-// 2. Créer une session d'abonnement (pour que le proprio vous paie vous)
+
+
 export async function createSubscription(plan: "PRO" | "EXPERT") {
   const session = await getServerSession(authOptions);
   const userId = (session?.user as any).id;
-  
-  // Ici vous devez avoir créé des "Produits" dans votre Dashboard Stripe
+
+  // SI TU ES EN MODE TEST SANS STRIPE CONFIGURÉ :
+  if (!process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY.includes('insert')) {
+      // Simule un succès immédiat pour le test
+      await prisma.user.update({
+          where: { id: userId },
+          data: { plan: plan }
+      });
+      revalidatePath('/compte/billing');
+      return; 
+  }
+
   const priceId = plan === "PRO" ? "price_ID_PRO" : "price_ID_EXPERT";
 
   const checkoutSession = await stripe.checkout.sessions.create({
@@ -55,4 +69,6 @@ export async function createSubscription(plan: "PRO" | "EXPERT") {
   });
 
   redirect(checkoutSession.url!);
+  
+  
 }

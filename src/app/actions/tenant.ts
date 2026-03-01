@@ -10,15 +10,87 @@ import { renderToBuffer } from "@react-pdf/renderer";
 import React from "react";
 import { ContratBail } from "@/components/templates/ContratBail";
 import { Resend } from "resend";
+import { headers } from "next/headers";
+import { createNotification } from "@/lib/notifications";
+import { finaliserActivationLocataire } from "@/lib/tenant-service";
+import bcrypt from "bcrypt";
+import crypto from "crypto";
+import { formatAdminName } from "@/lib/format";
+
 const resend = new Resend(process.env.RESEND_API_KEY)
 
+// --- GESTION DU PROFIL UTILISATEUR (Propriétaire & Locataire) ---
+
+export async function updateProfile(formData: FormData) {
+  const session = await getServerSession(authOptions);
+  const userId = (session?.user as any)?.id;
+
+  if (!userId) return { error: "Non autorisé" };
+
+  const data: any = {
+    firstName: formData.get('firstName') as string,
+    lastName: formData.get('lastName') as string,
+    name: formData.get('name') as string, // Raison sociale
+    email: formData.get('email') as string,
+    telephone: formData.get('telephone') as string,
+    adresse: formData.get('adresse') as string,
+    ville: formData.get('ville') as string,
+    codePostal: formData.get('codePostal') as string,
+    logoUrl: formData.get('logoUrl') as string || null,
+  };
+
+  try {
+    await prisma.user.update({
+      where: { id: userId },
+      data: data
+    });
+
+    revalidatePath('/compte');
+    revalidatePath('/tenant/profile');
+    revalidatePath('/dashboard');
+    return { success: true };
+  } catch (error) {
+    console.error("Erreur updateProfile:", error);
+    return { error: "Une erreur est survenue lors de la mise à jour du profil." };
+  }
+}
+
+export async function updatePassword(formData: FormData) {
+  const session = await getServerSession(authOptions);
+  const userId = (session?.user as any)?.id;
+
+  if (!userId) return { error: "Non autorisé" };
+
+  const currentPassword = formData.get('currentPassword') as string;
+  const newPassword = formData.get('newPassword') as string;
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.password) return { error: "Utilisateur non trouvé" };
+
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) return { error: "L'ancien mot de passe est incorrect." };
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { password: hashedPassword }
+    });
+
+    return { success: "Mot de passe mis à jour avec succès" };
+  } catch (error) {
+    return { error: "Erreur lors de la modification du mot de passe" };
+  }
+}
+
+// --- GESTION DES LOCATAIRES (BAILLEUR) ---
+
 export async function createTenant(formData: FormData) {
-  // 1. Vérification de la session (Sécurité)
   const session = await getServerSession(authOptions)
   const userId = (session?.user as any)?.id
   if (!userId) return { error: "Non autorisé" }
 
-  // 2. Récupération des données du formulaire
   const nom = formData.get('nom') as string
   const prenom = formData.get('prenom') as string
   const email = formData.get('email') as string
@@ -28,192 +100,297 @@ export async function createTenant(formData: FormData) {
   const bienId = formData.get('bienId') as string
   const jourPaiement = parseInt(formData.get('jourPaiement') as string)
   const sendContract = formData.get('sendContract') === 'on'
+  const dateDebutRaw = formData.get("dateDebutBail") as string;
+  const dateFinRaw = formData.get("dateFinBail") as string;
 
-  let newLocataireId = ""
+  const dateDebutBail = dateDebutRaw ? new Date(dateDebutRaw) : null;
+  const dateFinBail = dateFinRaw ? new Date(dateFinRaw) : null;
+  const alreadySigned = formData.get('alreadySigned') as string;
+  
+  const statutInitial = alreadySigned === 'yes' ? 'ACTIF' : 'BROUILLON';
+  const isActive = alreadySigned === 'yes';
 
   try {
-    // 3. Vérifier que le bien appartient bien à l'utilisateur connecté
     const bien = await prisma.bien.findFirst({
       where: { id: bienId, proprietaireId: userId }
     })
-    if (!bien) return { error: "Bien non trouvé ou non autorisé" }
+    if (!bien) return { error: "Bien non trouvé" }
 
-    // 4. Création du locataire
     const locataireCree = await prisma.locataire.create({
       data: {
-        nom,
-        prenom,
-        email,
-        loyerHC,
-        charges,
-        bienId,
-        jourPaiement,
-        telephone,
-        statut: "BROUILLON",
-        active: false
+        nom, prenom, email, loyerHC, charges, bienId,
+        jourPaiement, telephone, statut: statutInitial,
+        active: isActive, dateDebutBail, dateFinBail,
+        dateSignature: alreadySigned ? new Date() : null,
       },
-      include: { bien: true } // On inclut le bien pour avoir l'adresse dans le PDF
+      include: { bien: true }
     })
 
-    newLocataireId = locataireCree.id
-
-    // 5. Gestion de l'envoi du contrat (Bail)
-    if (sendContract) {
+    if (sendContract && !alreadySigned) {
       const proprietaire = await prisma.user.findUnique({ where: { id: userId } })
-      
       if (proprietaire) {
-        // Génération du PDF
         const pdfBuffer = await renderToBuffer(
-          React.createElement(ContratBail, { 
-            locataire: locataireCree, 
-            bien: bien, 
-            proprietaire: proprietaire 
-          })
+          React.createElement(ContratBail, { locataire: locataireCree, bien: bien, proprietaire })
         );
-
-        // Envoi par Resend
         await resend.emails.send({
-          from: 'LocaManager <gestion@getlocam.com>',
+          from: 'LocAm <notifications@getlocam.com>',
           to: locataireCree.email,
           subject: `Votre contrat de location - ${bien.nom}`,
-          attachments: [{ 
-            filename: `Bail_${nom}.pdf`, 
-            content: Buffer.from(pdfBuffer) 
-          }],
-          html: `<p>Bonjour ${prenom},</p><p>Veuillez trouver ci-joint votre contrat de location pour le logement : ${bien.adresse}.</p>`
+          attachments: [{ filename: `Bail_${nom}.pdf`, content: Buffer.from(pdfBuffer) }],
+          html: `<p>Bonjour ${prenom}, voici votre contrat de location.</p>`
         });
       }
     }
-
   } catch (error) {
-    console.error("Erreur creation locataire:", error)
+    console.error(error)
     return { error: "Impossible de créer le locataire" }
   }
 
-  // 6. Navigation (En dehors du try/catch)
   revalidatePath('/locataires')
   redirect('/locataires')
 }
 
-// app/actions/tenant.ts
-
-export async function activerManuellement(locataireId: string) {
-  const session = await getServerSession(authOptions);
-  if (!session) throw new Error("Non autorisé");
-
-  await prisma.locataire.update({
-    where: { 
-        id: locataireId,
-        bien: { proprietaireId: (session.user as any).id } // Sécurité
-    },
-    data: { 
-      statut: "ACTIF",
-      active: true,
-      methodeSign: "MANUELLE"
-    }
-  });
-
-  revalidatePath(`/locataires/${locataireId}`);
-  revalidatePath(`/locataires`);
-}
 export async function updateLocataire(id: string, formData: FormData) {
   const session = await getServerSession(authOptions);
-  const userId = (session?.user as any).id;
+  const userId = (session?.user as any)?.id;
+  if (!userId) throw new Error("Non autorisé");
 
-  // On extrait les données
-  const prenom = formData.get('prenom') as string;
-  const nom = formData.get('nom') as string;
-  const email = formData.get('email') as string;
-  const loyerHC = parseFloat(formData.get('loyerHC') as string);
-  const charges = parseFloat(formData.get('charges') as string);
-  const bienId = formData.get('bienId') as string;
-  const jourPaiement = parseInt(formData.get('jourPaiement') as string);
-  const telephone  = formData.get('telephone') as string
-  
-  // LOGIQUE CHECKBOX : Si cochée, formData renvoie "on", sinon null
-  const active = formData.get('active') === 'on';
+  const data = {
+    prenom: formData.get('prenom') as string,
+    nom: formData.get('nom') as string,
+    email: formData.get('email') as string,
+    telephone: formData.get('telephone') as string,
+    bienId: formData.get('bienId') as string,
+    loyerHC: parseFloat(formData.get('loyerHC') as string),
+    charges: parseFloat(formData.get('charges') as string),
+    jourPaiement: parseInt(formData.get('jourPaiement') as string),
+    active: formData.get('active') === 'on',
+    conditionsParticulieres: (formData.get('conditionsParticulieres') as string) || null,
+    dateDebutBail: formData.get("dateDebutBail") ? new Date(formData.get("dateDebutBail") as string) : null,
+    dateFinBail: formData.get("dateFinBail") ? new Date(formData.get("dateFinBail") as string) : null,
+  };
 
   try {
-    await prisma.locataire.update({
-      where: { 
-        id, 
-        bien: { proprietaireId: userId } // Sécurité : vérifie que le bien lié appartient au user
-      },
-      data: {
-        prenom,
-        nom,
-        email,
-        loyerHC,
-        charges,
-        bienId,
-        jourPaiement,
-        active,
-        telephone
-      },
+    await prisma.locataire.updateMany({
+      where: { id, bien: { proprietaireId: userId } },
+      data: data
     });
   } catch (error) {
-    console.error("Erreur update locataire:", error);
     return { error: "Erreur lors de la mise à jour" };
   }
 
   revalidatePath(`/locataires/${id}`);
-  revalidatePath(`/locataires`);
   redirect(`/locataires/${id}`);
+}
+
+export async function signContractAction(token: string, signatureData: string, mention: string) {
+  const headerList = await headers();
+  const ip = headerList.get("x-forwarded-for") || "unknown";
+
+  try {
+    const locataire = await prisma.locataire.findUnique({
+      where: { tokenSignature: token },
+      include: { bien: true }
+    });
+
+    if (!locataire) return { error: "Lien invalide" };
+
+    await prisma.locataire.update({
+      where: { id: locataire.id },
+      data: {
+        signatureDataLocataire: signatureData,
+        mentionLuApprouve: mention,
+        dateSignature: new Date(),
+        ipSignature: ip,
+        methodeSign: "INTERNE"
+      }
+    });
+
+    await finaliserActivationLocataire(locataire.id);
+    return { success: true };
+  } catch (e) { return { error: "Erreur" }; }
+}
+
+export async function inviterLocataire(locataireId: string) {
+  try {
+    const loc = await prisma.locataire.findUnique({
+      where: { id: locataireId },
+      include: { bien: { include: { proprietaire: true } } }
+    });
+
+    if (!loc) return { error: "Locataire introuvable" };
+
+    const token = loc.tokenSignature || crypto.randomUUID();
+    await prisma.locataire.update({
+      where: { id: locataireId },
+      data: { invitationToken: token, tokenSignature: token }
+    });
+
+    const existingUser = await prisma.user.findUnique({ where: { email: loc.email } });
+    const inviteUrl = `${process.env.NEXTAUTH_URL}/invite/${token}`;
+
+    await resend.emails.send({
+      from: 'LocAm Notifications <notifications@getlocam.com>',
+      to: loc.email,
+      subject: existingUser ? `Nouveau bail disponible` : `Invitation LocAm`,
+      html: `<p>Bonjour ${loc.prenom}, votre propriétaire vous invite sur LocAm.</p><a href="${inviteUrl}">Rejoindre mon espace</a>`
+    });
+
+    return { success: true };
+  } catch (error) {
+    return { error: "Erreur envoi invitation" };
+  }
+}
+
+// Les fonctions simples (activerManuellement, archive, delete, rappel)
+export async function activerManuellement(locataireId: string) {
+  const session = await getServerSession(authOptions);
+  if (!session) throw new Error("Non autorisé");
+  await prisma.locataire.update({
+    where: { id: locataireId, bien: { proprietaireId: (session.user as any).id } },
+    data: { statut: "ACTIF", active: true, methodeSign: "MANUELLE", dateSignature: new Date() }
+  });
+  revalidatePath(`/locataires/${locataireId}`);
+}
+
+// --- ARCHIVER (Résiliation de bail) ---
+// On garde les données mais on arrête les quittances et on cache le bail
+export async function archiveLocataire(id: string) {
+  const session = await getServerSession(authOptions);
+  const userId = (session?.user as any).id;
+
+  try {
+    // 1. Vérification de sécurité : le bail appartient-il à ce propriétaire ?
+    const bail = await prisma.locataire.findFirst({
+      where: { id, bien: { proprietaireId: userId } }
+    });
+
+    if (!bail) throw new Error("Bail non trouvé ou non autorisé");
+
+    // 2. Mise à jour : On résilie ce contrat spécifique
+    await prisma.locataire.update({
+      where: { id: id },
+      data: { 
+        archived: true, 
+        active: false,
+        statut: "TERMINE" // On utilise le statut pour la clarté historique
+      }
+    });
+
+  } catch (error) {
+    console.error("Erreur archivage bail:", error);
+    return { error: "Erreur lors de la résiliation" };
+  }
+
+  // 3. Rafraîchissement et redirection (TOUJOURS hors du try/catch)
+  revalidatePath('/locataires');
+  redirect('/locataires');
+}
+
+// --- SUPPRIMER (Erreur de saisie uniquement) ---
+// On supprime la ligne de contrat car elle n'aurait jamais dû exister
+export async function deleteLocataire(id: string) {
+  const session = await getServerSession(authOptions);
+  const userId = (session?.user as any).id;
+
+  try {
+    // 1. Vérification de sécurité
+    const bail = await prisma.locataire.findFirst({
+      where: { id, bien: { proprietaireId: userId } }
+    });
+
+    if (!bail) throw new Error("Bail non trouvé");
+
+    // 2. Suppression du contrat (la ligne Locataire)
+    // NOTE : Cela ne supprime PAS l'utilisateur (User) dans la table User !
+    // L'individu garde son compte LocAm pour ses autres baux.
+    await prisma.locataire.delete({
+      where: { id: id }
+    });
+
+  } catch (error) {
+    console.error("Erreur suppression bail:", error);
+    return { error: "Impossible de supprimer ce contrat" };
+  }
+
+  revalidatePath('/locataires');
+  redirect('/locataires');
 }
 
 
 export async function demarrerSignatureElectronique(locataireId: string) {
   const session = await getServerSession(authOptions);
-  if (!session) throw new Error("Non autorisé");
+  const userId = (session?.user as any)?.id;
 
-  // 1. On change le statut du locataire
-  await prisma.locataire.update({
-    where: { id: locataireId },
-    data: { 
-      statut: "ATTENTE_SIGNATURE",
-      methodeSign: "EN_LIGNE"
-    }
-  });
+  if (!userId) throw new Error("Non autorisé");
 
-  // 2. ICI : Logique d'appel à une API (Yousign, Dropbox Sign, etc.)
-  // Pour l'instant, on simule l'envoi d'un email avec Resend contenant le lien
-  const loc = await prisma.locataire.findUnique({ where: { id: locataireId } });
-  
-  /* 
-  await resend.emails.send({
-    to: loc.email,
-    subject: "Signature de votre contrat de location",
-    html: `<p>Bonjour, merci de signer votre contrat via ce lien : [LIEN_SIGNATURE]</p>`
-  });
-  */
+  try {
+    // 1. Récupérer le locataire et vérifier qu'il appartient bien au bailleur
+    const loc = await prisma.locataire.findFirst({
+      where: { 
+        id: locataireId, 
+        bien: { proprietaireId: userId } 
+      },
+      include: { 
+        bien: { include: { proprietaire: true } } 
+      }
+    });
 
-  revalidatePath(`/locataires/${locataireId}`);
-}
+    if (!loc) throw new Error("Locataire non trouvé");
 
+    // 2. Générer un token de signature unique s'il n'existe pas déjà
+    const token = loc.tokenSignature || crypto.randomUUID();
 
-// ARCHIVER (Masquer)
-export async function archiveLocataire(id: string) {
-  const session = await getServerSession(authOptions)
-  const userId = (session?.user as any).id
+    // 3. Mettre à jour le locataire : Statut "ATTENTE_SIGNATURE"
+    await prisma.locataire.update({
+      where: { id: locataireId },
+      data: {
+        statut: "ATTENTE_SIGNATURE",
+        methodeSign: "EN_LIGNE",
+        tokenSignature: token,
+        invitationToken: token, // On synchronise les tokens pour plus de simplicité
+      }
+    });
 
-  await prisma.locataire.update({
-    where: { id, bien: { proprietaireId: userId } },
-    data: { archived: true, active: false }
-  })
+    // 4. Préparer l'email avec le lien sécurisé
+    const signLink = `${process.env.NEXTAUTH_URL}/sign/${token}`;
+    const bailleurName = formatAdminName(
+      loc.bien.proprietaire.firstName||'', 
+      loc.bien.proprietaire.lastName||'', 
+      loc.bien.proprietaire.name
+    );
 
-  revalidatePath('/locataires')
-  redirect('/locataires')
-}
+    await resend.emails.send({
+      from: 'LocAm Security <notifications@getlocam.com>',
+      to: loc.email,
+      subject: `Signature de votre contrat de location - ${loc.bien.nom}`,
+      html: `
+        <div style="font-family: sans-serif; line-height: 1.6; color: #1e293b;">
+          <h2>Bonjour ${loc.prenom},</h2>
+          <p>Votre propriétaire, <strong>${bailleurName}</strong>, vous invite à signer électroniquement votre contrat de bail pour le logement situé à :</p>
+          <p style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #e2e8f0;">
+            <strong>${loc.bien.nom}</strong><br/>
+            ${loc.bien.adresse}, ${loc.bien.ville}
+          </p>
+          <p>Veuillez cliquer sur le bouton ci-dessous pour consulter et signer le document. Cette opération ne prend que quelques minutes.</p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${signLink}" style="background-color: #2563eb; color: white; padding: 12px 25px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">
+              Lire et signer mon bail
+            </a>
+          </div>
+          <p style="font-size: 11px; color: #94a3b8;">
+            Ce lien est strictement personnel et sécurisé. Ne le partagez pas.
+          </p>
+        </div>
+      `
+    });
 
-// SUPPRIMER DÉFINITIVEMENT (Erreur de saisie)
-export async function deleteLocataire(id: string) {
-  const session = await getServerSession(authOptions)
-  const userId = (session?.user as any).id
+    // 5. Rafraîchir la page pour voir le changement de statut
+    revalidatePath(`/locataires/${locataireId}`);
+    return { success: true };
 
-  await prisma.locataire.delete({
-    where: { id, bien: { proprietaireId: userId } }
-  })
-
-  revalidatePath('/locataires')
-  redirect('/locataires')
+  } catch (error) {
+    console.error("Erreur demarrerSignatureElectronique:", error);
+    return { error: "Une erreur est survenue lors du lancement de la signature." };
+  }
 }

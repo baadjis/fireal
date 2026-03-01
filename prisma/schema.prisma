@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,38 +8,159 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-// 1. Le Propriétaire (Utilisateur principal)
-
-// prisma/schema.prisma
-
-// ... gardez vos modèles User, Bien, Locataire existants ...
-// Mais modifiez le modèle User pour qu'il ait la relation vers Account et Session
-
-model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String?   @unique
-  emailVerified DateTime?
-  image         String?
-  password      String?
-  adresse        String?
-  ville          String?
-  codePostal     String?
-  telephone      String?
-  plan           String   @default("BASIC") // "BASIC", "PRO", "EXPERT"
-  
-  // Pour le plan PRO & EXPERT (Stripe Connect)
-  stripeConnectedId String?  @unique 
-  
-  subscriptionId   String?
-  
-  accounts      Account[] // AJOUTER CECI
-  sessions      Session[] // AJOUTER CECI
-  biens         Bien[]
-  createdAt     DateTime  @default(now())
+enum Role {
+  ADMIN       // Toi (Le patron de LocAm)
+  OWNER       // Le client qui paye (Le Propriétaire)
+  MANAGER     // L'employé du propriétaire (Le Gestionnaire)
+  TENANT      // Le Locataire
 }
 
-// AJOUTER CE MODÈLE (Obligatoire pour Google)
+enum TypeBien {
+  STUDIO
+  T1
+  T2
+  T3
+  T4
+  T5
+  MAISON
+  PARKING
+  LOCAL_COMMERCIAL
+}
+
+enum StatutContrat {
+  BROUILLON
+  ATTENTE_SIGNATURE
+  SIGNE
+  ACTIF
+  TERMINE
+}
+
+model User {
+  id                String    @id @default(cuid())
+  role              Role      @default(OWNER)
+  name              String?
+  firstName         String?
+  lastName          String?
+  email             String?   @unique
+  emailVerified     DateTime?
+  password          String?
+  image             String?
+  signatureData     String?   @db.Text
+  logoUrl           String?
+  
+  // Coordonnées (Loi ALUR)
+  adresse           String?
+  ville             String?
+  codePostal        String?
+  telephone         String?
+  
+  // Facturation SaaS
+  plan              String    @default("BASIC")
+  stripeConnectedId String?   @unique
+  subscriptionId    String?
+
+  // Consentement
+  termsAccepted     Boolean   @default(false)
+  termsAcceptedAt   DateTime?
+
+  // --- RELATIONS ENTERPRISE ---
+  // Relation Owner <-> Manager
+  ownerId           String?   // Si c'est un manager, on stocke l'ID de son patron (Owner)
+  managedBy         User?     @relation("ManagerToOwner", fields: [ownerId], references: [id])
+  managers          User[]    @relation("ManagerToOwner")
+
+  // Relation User <-> Locataire (Pour que le locataire puisse se connecter)
+  locataireProfiles Locataire[] @relation("UserToLocataire")
+
+  // Systèmes tiers
+  accounts          Account[]
+  sessions          Session[]
+  notifications     Notification[]
+  invoices          Invoice[]
+  biens             Bien[]     // Les biens qu'il possède
+  accesses          Access[]   // Les accès spécifiques (pour les managers)
+
+  createdAt         DateTime  @default(now())
+}
+
+model Locataire {
+  id                     String        @id @default(cuid())
+  nom                    String
+  prenom                 String
+  email                  String        @unique
+  telephone              String?
+  
+  // Lien vers le compte utilisateur (pour la connexion locataire)
+  userId                 String?       @unique
+  user              User?       @relation("UserToLocataire", fields: [userId], references: [id])
+  
+  invitationToken   String?     @unique
+  invitationStatus  String      @default("PENDING") // PENDING, ACCEPTED
+  // Finances
+  loyerHC                Float
+  charges                Float
+  jourPaiement           Int           @default(1)
+  stripeCustomerId       String?       @unique 
+  paiements              Paiement[]
+  quittances             Quittance[]
+
+  // Logement
+  bien                   Bien          @relation(fields: [bienId], references: [id])
+  bienId                 String
+
+  // Statut et Signature
+  active                 Boolean       @default(true)
+  statut                 StatutContrat @default(BROUILLON)
+  tokenSignature         String?       @unique
+  signatureDataLocataire String?       @db.Text
+  mentionLuApprouve      String?
+  dateSignature          DateTime?
+  ipSignature            String?
+  methodeSign            String?       // "MANUELLE" ou "EN_LIGNE"
+  signatureId            String?   @unique 
+  conditionsParticulieres String?      @db.Text
+  vuParBailleur          Boolean       @default(false)
+
+  // Dates
+  dateDebutBail          DateTime?
+  dateFinBail            DateTime?
+  preavisMois            Int           @default(3)
+  
+  archived               Boolean       @default(false)
+  createdAt              DateTime      @default(now())
+}
+
+model Bien {
+  id             String      @id @default(cuid())
+  nom            String
+  type           TypeBien    @default(T2)
+  adresse        String
+  ville          String
+  codePostal     String
+  etage          Int?
+  numeroPorte    String?
+  surface        Float?
+  description    String?     @db.Text
+  
+  proprietaire   User        @relation(fields: [proprietaireId], references: [id])
+  proprietaireId String
+  isMeuble       Boolean     @default(false) 
+  inventaire     String?     @db.Text    
+  locataires     Locataire[]
+  accesses       Access[]
+  createdAt      DateTime    @default(now())
+}
+
+model Access {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  bienId    String
+  bien      Bien     @relation(fields: [bienId], references: [id])
+  role      String   // "VIEWER", "EDITOR"
+}
+
+// Les autres modèles (Account, Session, Notification, PasswordResetToken, SupportTicket, Invoice, Paiement, Quittance) restent identiques à votre version.
 model Account {
   id                 String  @id @default(cuid())
   userId             String
@@ -56,13 +174,10 @@ model Account {
   scope              String?
   id_token           String?  @db.Text
   session_state      String?
-
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
   @@unique([provider, providerAccountId])
 }
 
-// AJOUTER CE MODÈLE (Obligatoire pour les sessions)
 model Session {
   id           String   @id @default(cuid())
   sessionToken String   @unique
@@ -71,96 +186,70 @@ model Session {
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
-
-// Ajoutez l'Enum pour les types de biens
-enum TypeBien {
-  STUDIO
-  T1
-  T2
-  T3
-  T4
-  T5
-  MAISON
-  PARKING
-  LOCAL_COMMERCIAL
-}
-
-model Bien {
-  id             String      @id @default(cuid())
-  nom            String      // Nom "amical" (ex: T3 Centre)
-  type           TypeBien    @default(T2) // Type de logement
-  adresse        String
-  ville          String
-  codePostal     String
-  etage          Int?        // Etage (null si maison)
-  numeroPorte    String?     // Numéro ou lettre sur la porte
-  surface        Float?      // Surface en m² (Loi Carrez)
-  description    String?     @db.Text
-  
-  proprietaire   User        @relation(fields: [proprietaireId], references: [id])
-  proprietaireId String
-  locataires     Locataire[]
-  createdAt      DateTime    @default(now())
-}
-
-enum StatutContrat {
-  BROUILLON        // Le bail est généré mais pas encore envoyé
-  ATTENTE_SIGNATURE // Envoyé pour signature (en ligne ou manuelle)
-  SIGNE            // Le contrat est signé mais le locataire n'est pas encore "en place"
-  ACTIF            // Le bail est en cours (déclenche les quittances)
-  TERMINE          // Le locataire est parti
-}
-// 3. Le Locataire
-model Locataire {
-  id             String      @id @default(cuid())
-  nom            String
-  prenom         String
-  email          String      @unique
-  telephone      String?
-  
-  // Détails financiers du bail
-  loyerHC        Float       // Loyer Hors Charges
-  charges        Float       // Montant des charges
-  jourPaiement   Int         @default(1) // Jour du mois où le loyer est dû (ex: le 1er ou le 5)
-  
-  bien           Bien        @relation(fields: [bienId], references: [id])
-  bienId         String
-  stripeCustomerId String?     @unique 
-  paiements      Paiement[]
-  quittances     Quittance[] // Liste des quittances générées pour ce locataire
-  active         Boolean     @default(true) // Pour savoir si le locataire est toujours là
-  statut      StatutContrat @default(BROUILLON)
-  methodeSign String?       // "MANUELLE" ou "EN_LIGNE"
-  signatureId String? 
-  archived    Boolean   @default(false)
-  createdAt      DateTime    @default(now())
-  
-}
-
-// 4. L'historique des Quittances/Avis d'échéance
-model Quittance {
-  id             String    @id @default(cuid())
-  mois           Int       // 1 pour Janvier, 2 pour Février, etc.
-  annee          Int       // 2024, 2025...
-  type           String    // "AVIS_ECHEANCE" ou "QUITTANCE"
-  status         String    // "ENVOYE" ou "PAYE"
-  
-  montantTotal   Float
-  pdfUrl         String?   // Si vous stockez le PDF sur un service comme Uploadthing ou AWS S3
-  
-  locataire      Locataire @relation(fields: [locataireId], references: [id])
-  locataireId    String
-  
-  createdAt      DateTime  @default(now())
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  type      String
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
 }
 
 model Paiement {
   id          String    @id @default(cuid())
-  mois        Int       // 1-12
+  mois        Int
   annee       Int
   datePaiement DateTime @default(now())
   locataire   Locataire @relation(fields: [locataireId], references: [id])
   locataireId String
+  @@unique([locataireId, mois, annee])
+}
 
-  @@unique([locataireId, mois, annee]) // Un seul paiement par mois pour un locataire
+model Quittance {
+  id             String    @id @default(cuid())
+  mois           Int
+  annee          Int
+  type           String
+  status         String
+  montantTotal   Float
+  pdfUrl         String?
+  locataire      Locataire @relation(fields: [locataireId], references: [id])
+  locataireId    String
+  createdAt      DateTime  @default(now())
+}
+
+model Invoice {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  number          String   @unique
+  amount          Float
+  status          String   @default("PAID")
+  type            String
+  stripeInvoiceId String?
+  createdAt       DateTime @default(now())
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  email     String
+  token     String   @unique
+  expires   DateTime
+  createdAt DateTime @default(now())
+  @@unique([email, token])
+}
+
+model SupportTicket {
+  id          String   @id @default(cuid())
+  name        String
+  email       String
+  subject     String
+  message     String
+  reply       String?  @db.Text
+  status      String   @default("OPEN")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

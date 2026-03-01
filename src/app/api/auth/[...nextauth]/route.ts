@@ -6,24 +6,27 @@ import { PrismaAdapter } from "@next-auth/prisma-adapter";
 import prisma from "@/lib/prisma";
 import bcrypt from "bcrypt";
 
-console.log("DEBUG: Prisma est chargé ?", !!prisma);
-if (prisma) {
-  console.log("DEBUG: Modèles disponibles :", Object.keys(prisma).filter(k => !k.startsWith("_")));
-}
-
 export const authOptions: NextAuthOptions = {
-  // 1. On lie NextAuth à notre base de données Supabase via Prisma
   adapter: PrismaAdapter(prisma) as any,
 
-  // 2. Définition des méthodes de connexion
   providers: [
-    // Connexion avec Google
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+      allowDangerousEmailAccountLinking: true,
+      profile(profile) {
+        return {
+          id: profile.sub,
+          name: profile.name,
+          email: profile.email,
+          image: profile.picture,
+          firstName: profile.given_name,
+          lastName: profile.family_name,
+          role: "OWNER", // Par défaut, mais sera écrasé par l'événement createUser si c'est un locataire
+        };
+      },
     }),
 
-    // Connexion avec Email / Mot de passe
     CredentialsProvider({
       name: "credentials",
       credentials: {
@@ -31,70 +34,90 @@ export const authOptions: NextAuthOptions = {
         password: { label: "Password", type: "password" },
       },
       async authorize(credentials) {
-        // Vérifier si l'utilisateur a rempli les champs
         if (!credentials?.email || !credentials?.password) {
           throw new Error("Identifiants manquants");
         }
-
-        // Chercher l'utilisateur dans la base de données
         const user = await prisma.user.findUnique({
           where: { email: credentials.email },
         });
-
-        // Si l'utilisateur n'existe pas ou n'a pas de mot de passe (ex: inscrit via Google)
         if (!user || !user.password) {
-          throw new Error("Utilisateur non trouvé ou connecté via Google");
+          throw new Error("Utilisateur non trouvé");
         }
-
-        // Comparer le mot de passe saisi avec le mot de passe haché en base
-        const isPasswordValid = await bcrypt.compare(
-          credentials.password,
-          user.password
-        );
-
+        const isPasswordValid = await bcrypt.compare(credentials.password, user.password);
         if (!isPasswordValid) {
           throw new Error("Mot de passe incorrect");
         }
-
         return user;
       },
     }),
   ],
 
-  // 3. Paramètres de session
   session: {
-    // IMPORTANT : Obligatoire pour faire fonctionner "Credentials"
-    strategy: "jwt", 
+    strategy: "jwt",
   },
 
-  // 4. Callbacks pour manipuler les données de session
   callbacks: {
-    // On ajoute l'ID de l'utilisateur dans le Token JWT
     async jwt({ token, user }) {
       if (user) {
         token.id = user.id;
+        token.role = (user as any).role;
       }
       return token;
     },
-    // On expose l'ID de l'utilisateur dans la session côté client (Front-end)
     async session({ session, token }) {
       if (session.user) {
         (session.user as any).id = token.id;
+        (session.user as any).role = token.role;
       }
       return session;
     },
   },
 
-  // 5. Pages personnalisées
+  // --- ÉVÉNEMENTS : LOGIQUE DE LIAISON LOCATAIRE ---
+  events: {
+    async createUser({ user }) {
+      // 1. On cherche s'il existe une fiche locataire créée par un proprio pour cet email
+      const locataireFiche = await prisma.locataire.findUnique({
+        where: { email: user.email! },
+        include: { 
+          bien: { 
+            include: { proprietaire: true } 
+          } 
+        }
+      });
+
+      if (locataireFiche) {
+        const planProprio = locataireFiche.bien.proprietaire.plan;
+
+        // 2. VÉRIFICATION DU PLAN : L'espace locataire est réservé aux plans PRO et EXPERT
+        if (planProprio === "PRO" || planProprio === "EXPERT") {
+          await prisma.$transaction([
+            // On change le rôle de l'utilisateur qui vient de s'inscrire
+            prisma.user.update({
+              where: { id: user.id },
+              data: { role: "TENANT" }
+            }),
+            // On lie la fiche locataire à ce nouvel utilisateur
+            prisma.locataire.update({
+              where: { id: locataireFiche.id },
+              data: { userId: user.id }
+            })
+          ]);
+          console.log(`✅ Liaison Locataire réussie (Plan ${planProprio}) : ${user.email}`);
+        } else {
+          console.log(`⚠️ Liaison avortée : Le propriétaire est en plan ${planProprio} (BASIC requis pour espace locataire)`);
+        }
+      }
+    }
+  },
+
   pages: {
     signIn: "/login",
     error: "/login",
   },
 
-  // 6. Sécurité
   secret: process.env.NEXTAUTH_SECRET,
 };
 
 const handler = NextAuth(authOptions);
-
 export { handler as GET, handler as POST };
