@@ -9,9 +9,9 @@ import React from 'react';
 
 export async function GET(
   request: Request,
-  { params }: { params: Promise<{ locataireId: string }> }
+  { params }: { params: Promise<{ LocataireId: string }> }
 ) {
-  const { locataireId } = await params;
+  const { LocataireId } = await params;
   const { searchParams } = new URL(request.url);
   const tokenParam = searchParams.get('token'); // Récupération du token depuis l'URL
 
@@ -23,7 +23,7 @@ export async function GET(
     // 2. VÉRIFICATION DE SÉCURITÉ HYBRIDE
     const locataireCheck = await prisma.locataire.findFirst({
       where: { 
-        id: locataireId,
+        id: LocataireId,
         OR: [
           // Option A : Utilisateur connecté est le proprio
           { bien: { proprietaireId: userId || 'non-connecté' } }, 
@@ -59,7 +59,7 @@ export async function GET(
 
     if (!bienComplet) return new NextResponse("Erreur données", { status: 404 });
 
-    const currentLocataire = bienComplet.locataires.find(l => l.id === locataireId);
+    const currentLocataire = bienComplet.locataires.find(l => l.id === LocataireId);
 
     // 4. GÉNÉRATION DU PDF
     const buffer = await renderToBuffer(
