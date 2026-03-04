@@ -396,15 +396,15 @@ export async function demarrerSignatureElectronique(locataireId: string) {
   }
 }
 
-export async function renvoyerRappelSignature(locataireId:string) {
-
-   const session = await getServerSession(authOptions);
+export async function renvoyerRappelSignature(locataireId: string) {
+  // 1. Vérification session
+  const session = await getServerSession(authOptions);
   const userId = (session?.user as any)?.id;
 
-  if (!userId) throw new Error("Non autorisé");
+  if (!userId) return { error: "Non autorisé" };
 
   try {
-    // 1. Récupérer le locataire et vérifier qu'il appartient bien au bailleur
+    // 2. Récupérer le locataire et vérifier la propriété
     const loc = await prisma.locataire.findFirst({
       where: { 
         id: locataireId, 
@@ -415,134 +415,66 @@ export async function renvoyerRappelSignature(locataireId:string) {
       }
     });
 
-    if (!loc) throw new Error("Locataire non trouvé");
+    if (!loc) return { error: "Locataire non trouvé" };
 
-    // 2. Générer un token de signature unique s'il n'existe pas déjà
+    // 3. Récupérer ou générer le token
     const token = loc.tokenSignature || crypto.randomUUID();
 
-    // 3. Mettre à jour le locataire : Statut "ATTENTE_SIGNATURE"
+    // 4. Mettre à jour le statut (important pour passer de BROUILLON à ATTENTE_SIGNATURE)
     await prisma.locataire.update({
       where: { id: locataireId },
       data: {
         statut: "ATTENTE_SIGNATURE",
         methodeSign: "EN_LIGNE",
         tokenSignature: token,
-        invitationToken: token, // On synchronise les tokens pour plus de simplicité
+        invitationToken: token,
       }
     });
 
-    // 4. Préparer l'email avec le lien sécurisé
+    // 5. Préparer l'email
     const signLink = `${process.env.NEXTAUTH_URL}/sign/${token}`;
     const bailleurName = formatAdminName(
-      loc.bien.proprietaire.firstName||'', 
-      loc.bien.proprietaire.lastName||'', 
+      loc.bien.proprietaire.firstName || '', 
+      loc.bien.proprietaire.lastName || '', 
       loc.bien.proprietaire.name
     );
 
-    await resend.emails.send({
+    // 6. Envoi Resend
+    const { error: emailError } = await resend.emails.send({
       from: 'LocAm Security <notifications@getlocam.com>',
       to: loc.email,
-      subject: `Signature de votre contrat de location - ${loc.bien.nom}`,
+      subject: `Rappel : Signature de votre contrat de location - ${loc.bien.nom}`,
       html: `
         <div style="font-family: sans-serif; line-height: 1.6; color: #1e293b;">
           <h2>Bonjour ${loc.prenom},</h2>
-          <p>Votre propriétaire, <strong>${bailleurName}</strong>, vous invite à signer électroniquement votre contrat de bail pour le logement situé à :</p>
+          <p>Ceci est un rappel concernant la signature électronique de votre contrat de bail pour le logement :</p>
           <p style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #e2e8f0;">
             <strong>${loc.bien.nom}</strong><br/>
             ${loc.bien.adresse}, ${loc.bien.ville}
           </p>
-          <p>Veuillez cliquer sur le bouton ci-dessous pour consulter et signer le document. Cette opération ne prend que quelques minutes.</p>
+          <p>Merci de cliquer sur le bouton ci-dessous pour signer le document en ligne :</p>
           <div style="text-align: center; margin: 30px 0;">
             <a href="${signLink}" style="background-color: #2563eb; color: white; padding: 12px 25px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">
-              Lire et signer mon bail
+              Consulter et signer mon bail
             </a>
           </div>
           <p style="font-size: 11px; color: #94a3b8;">
-            Ce lien est strictement personnel et sécurisé. Ne le partagez pas.
+            Envoyé par votre bailleur : ${bailleurName}
           </p>
         </div>
       `
     });
 
-    // 5. Rafraîchir la page pour voir le changement de statut
+    if (emailError) throw new Error("Erreur lors de l'envoi de l'email");
+
+    // 7. Rafraîchissement UI
     revalidatePath(`/locataires/${locataireId}`);
     return { success: true };
 
   } catch (error) {
-    console.error("Erreur demarrerSignatureElectronique:", error);
-    return { error: "Une erreur est survenue lors du lancement de la signature." };
-  }
-  
-}
-
-
-
-export async function signContractAction2(token: string, signatureData: string, mention: string) {
-  // 1. Récupération des preuves (IP)
-  const headerList = await headers();
-  const ip = headerList.get("x-forwarded-for") || "unknown";
-
-  try {
-    // 2. On cherche le locataire via le TOKEN (car c'est votre système interne)
-    const locataire = await prisma.locataire.findUnique({
-      where: { tokenSignature: token },
-      include: { 
-        bien: { 
-          include: { proprietaire: true } 
-        } 
-      }
-    });
-
-    if (!locataire) return { error: "Lien de signature invalide ou expiré." };
-
-    // 3. Mise à jour du locataire (Status, Activation et Notification Sidebar)
-    await prisma.locataire.update({
-      where: { id: locataire.id },
-      data: {
-        signatureDataLocataire: signatureData,
-        mentionLuApprouve: mention,
-        dateSignature: new Date(),
-        ipSignature: ip,
-        statut: "ACTIF",
-        active: true,
-        vuParBailleur: false // <-- C'est ça qui déclenche la pastille rouge sur "Mes Locataires"
-      }
-    });
-
-    // 4. CRÉATION DE LA NOTIFICATION GLOBALE (Pour la cloche)
-    const proprietaire = locataire.bien.proprietaire;
-    const tenantName = formatAdminName(locataire.prenom, locataire.nom);
-
-    await createNotification(proprietaire.id, {
-      title: "🖋️ Contrat de bail signé",
-      message: `${tenantName} a signé son contrat de bail électroniquement.`,
-      type: "SIGNATURE",
-      link: `/locataires/${locataire.id}`
-    });
-
-    // 5. ENVOI DE L'EMAIL DE NOTIFICATION AU PROPRIÉTAIRE
-    if (proprietaire.email) {
-      await resend.emails.send({
-        from: 'LocAm Notifications <notifications@getlocam.com>',
-        to: proprietaire.email,
-        subject: `✅ Contrat signé : ${tenantName}`,
-        html: `
-          <div style="font-family: sans-serif; line-height: 1.6;">
-            <h2>Excellente nouvelle !</h2>
-            <p>Votre locataire <strong>${tenantName}</strong> a signé son contrat de bail.</p>
-            <p>Le dossier est désormais complet et le locataire est activé dans votre gestion.</p>
-            <a href="${process.env.NEXTAUTH_URL}/locataires/${locataire.id}" style="background:#2563eb; color:white; padding:12px 20px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:bold;">Voir le dossier</a>
-          </div>
-        `
-      });
-    }
-
-    revalidatePath(`/locataires/${locataire.id}`);
-    revalidatePath('/locataires'); // Pour mettre à jour la liste avec le point rouge
-    return { success: true };
-
-  } catch (error) {
-    console.error("Erreur signature interne:", error);
-    return { error: "Une erreur est survenue lors de la validation." };
+    console.error("Erreur renvoyerRappelSignature:", error);
+    return { error: "Une erreur est survenue lors de l'envoi du rappel." };
   }
 }
+
+
