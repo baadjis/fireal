@@ -23,6 +23,9 @@ export default function LoginPage() {
     else router.push(callbackUrl)
   }
 
+    
+  
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_right,_var(--tw-gradient-stops))] from-blue-50 via-slate-50 to-white p-3">
       <div className="w-full max-w-md bg-white/80 backdrop-blur-xl rounded-[2.5rem] shadow-[0_20px_50px_rgba(37,99,235,0.1)] border border-white p-6 md:p-8 space-y-4">
@@ -56,7 +59,7 @@ export default function LoginPage() {
           <span className="flex-shrink mx-4 text-[9px] font-black text-slate-400 uppercase tracking-widest">OU</span>
           <div className="flex-grow border-t border-slate-200"></div>
         </div>
-         <Suspense >
+         <Suspense  fallback={<div>Loading...</div>}>
         <form onSubmit={handleSubmit} className="space-y-3">
           <div className="space-y-3">
             <div className="relative group">
