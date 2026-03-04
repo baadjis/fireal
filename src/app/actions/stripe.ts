@@ -9,7 +9,7 @@ import prisma from "@/lib/prisma";
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-01-27' });
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 
 // 1. Créer le compte Stripe Connect (pour que le proprio reçoive les loyers)
 export async function createConnectAccount() {

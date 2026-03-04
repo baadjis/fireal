@@ -1,3 +1,4 @@
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 'use server'
 
@@ -393,4 +394,83 @@ export async function demarrerSignatureElectronique(locataireId: string) {
     console.error("Erreur demarrerSignatureElectronique:", error);
     return { error: "Une erreur est survenue lors du lancement de la signature." };
   }
+}
+
+export async function renvoyerRappelSignature(locataireId:string) {
+
+   const session = await getServerSession(authOptions);
+  const userId = (session?.user as any)?.id;
+
+  if (!userId) throw new Error("Non autorisé");
+
+  try {
+    // 1. Récupérer le locataire et vérifier qu'il appartient bien au bailleur
+    const loc = await prisma.locataire.findFirst({
+      where: { 
+        id: locataireId, 
+        bien: { proprietaireId: userId } 
+      },
+      include: { 
+        bien: { include: { proprietaire: true } } 
+      }
+    });
+
+    if (!loc) throw new Error("Locataire non trouvé");
+
+    // 2. Générer un token de signature unique s'il n'existe pas déjà
+    const token = loc.tokenSignature || crypto.randomUUID();
+
+    // 3. Mettre à jour le locataire : Statut "ATTENTE_SIGNATURE"
+    await prisma.locataire.update({
+      where: { id: locataireId },
+      data: {
+        statut: "ATTENTE_SIGNATURE",
+        methodeSign: "EN_LIGNE",
+        tokenSignature: token,
+        invitationToken: token, // On synchronise les tokens pour plus de simplicité
+      }
+    });
+
+    // 4. Préparer l'email avec le lien sécurisé
+    const signLink = `${process.env.NEXTAUTH_URL}/sign/${token}`;
+    const bailleurName = formatAdminName(
+      loc.bien.proprietaire.firstName||'', 
+      loc.bien.proprietaire.lastName||'', 
+      loc.bien.proprietaire.name
+    );
+
+    await resend.emails.send({
+      from: 'LocAm Security <notifications@getlocam.com>',
+      to: loc.email,
+      subject: `Signature de votre contrat de location - ${loc.bien.nom}`,
+      html: `
+        <div style="font-family: sans-serif; line-height: 1.6; color: #1e293b;">
+          <h2>Bonjour ${loc.prenom},</h2>
+          <p>Votre propriétaire, <strong>${bailleurName}</strong>, vous invite à signer électroniquement votre contrat de bail pour le logement situé à :</p>
+          <p style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #e2e8f0;">
+            <strong>${loc.bien.nom}</strong><br/>
+            ${loc.bien.adresse}, ${loc.bien.ville}
+          </p>
+          <p>Veuillez cliquer sur le bouton ci-dessous pour consulter et signer le document. Cette opération ne prend que quelques minutes.</p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${signLink}" style="background-color: #2563eb; color: white; padding: 12px 25px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">
+              Lire et signer mon bail
+            </a>
+          </div>
+          <p style="font-size: 11px; color: #94a3b8;">
+            Ce lien est strictement personnel et sécurisé. Ne le partagez pas.
+          </p>
+        </div>
+      `
+    });
+
+    // 5. Rafraîchir la page pour voir le changement de statut
+    revalidatePath(`/locataires/${locataireId}`);
+    return { success: true };
+
+  } catch (error) {
+    console.error("Erreur demarrerSignatureElectronique:", error);
+    return { error: "Une erreur est survenue lors du lancement de la signature." };
+  }
+  
 }
