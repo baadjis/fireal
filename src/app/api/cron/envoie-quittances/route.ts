@@ -10,7 +10,7 @@ import { formatAdminName, capitalizeFirstLetter } from '@/lib/format';
 import Stripe from 'stripe';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2025-01-27" }) : null;
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY!) : null;
 
 export async function GET(request: Request) {
   // 1. SÉCURITÉ CRON

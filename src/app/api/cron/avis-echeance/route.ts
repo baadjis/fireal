@@ -14,7 +14,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 // Initialisation sécurisée de Stripe
 const stripeSecret = process.env.STRIPE_SECRET_KEY;
 const isStripeConfigured = stripeSecret && !stripeSecret.includes('insert_your');
-const stripe = isStripeConfigured ? new Stripe(stripeSecret, { apiVersion: "2025-01-27" }) : null;
+const stripe = isStripeConfigured ? new Stripe(stripeSecret!) : null;
 
 export async function GET(request: Request) {
   // 1. SÉCURITÉ CRON
