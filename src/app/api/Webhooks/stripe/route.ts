@@ -5,9 +5,7 @@ import prisma from '@/lib/prisma';
 import { confirmerPaiementEtEnvoyerQuittance } from '@/app/actions/quittance';
 import { createNotification } from '@/lib/notifications'; // Import de votre utilitaire
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: '2025-01-27',
-});
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET!;
 
