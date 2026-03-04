@@ -1,7 +1,7 @@
 'use client'
 
 import { signIn } from "next-auth/react"
-import React, { useState } from "react"
+import { useState,Suspense } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import Link from "next/link"
 import Image from "next/image"
@@ -56,7 +56,7 @@ export default function LoginPage() {
           <span className="flex-shrink mx-4 text-[9px] font-black text-slate-400 uppercase tracking-widest">OU</span>
           <div className="flex-grow border-t border-slate-200"></div>
         </div>
-
+         <Suspense >
         <form onSubmit={handleSubmit} className="space-y-3">
           <div className="space-y-3">
             <div className="relative group">
@@ -94,6 +94,7 @@ export default function LoginPage() {
             Se connecter <ArrowRight size={14} />
           </button>
         </form>
+        </Suspense>
 
         <div className="text-center pt-2 border-t border-slate-100 space-y-3">
           <p className="text-[10px] text-slate-400">
